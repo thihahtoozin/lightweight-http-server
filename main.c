@@ -12,7 +12,7 @@
 
 typedef struct {
     unsigned int fd;
-    char ip[INET_ADDRSTRLEN];
+    const char ip[INET_ADDRSTRLEN];
     unsigned short port;
 }client_t;
 
@@ -37,10 +37,6 @@ void disconnect(unsigned int c_fd, client_t **clients, unsigned int *n_clients, 
                 (*clients)[k] = (*clients)[k+1];
             }
             void *tmp = realloc(*clients, sizeof(client_t)*(--*n_clients));
-            //if(!tmp){
-            //    perror("[disconnects] clients realloc() error");
-            //    exit(EXIT_FAILURE);
-            //}
             *clients = tmp;
 
             // Remove the client fd from the `pfds`
@@ -56,6 +52,8 @@ void disconnect(unsigned int c_fd, client_t **clients, unsigned int *n_clients, 
             if(!tmp){
                 perror("[disconnects] pfds realloc() error");
                 exit(EXIT_FAILURE);
+                free(*clients);
+                free(*pfds);
             }
             *pfds = tmp;
             break;
@@ -70,7 +68,7 @@ int main(int argc, char **argv){
         fprintf(stderr, "Usage %s <ip> <port>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-    char *serv_ip = argv[1];
+    const char *serv_ip = argv[1];
     unsigned short serv_port = atoi(argv[2]);
     
     // Establishing server socket
@@ -125,10 +123,12 @@ int main(int argc, char **argv){
         if(n_ready < 0){
             perror("poll() error");
             exit(EXIT_FAILURE);
+            free(clients);
+            free(pfds);
         }else if(n_ready > 0){
             for(int i = 0; i < n_pfds; i++){
                 if(pfds[i].revents & POLLIN){      // there is any data to read
-                    if(pfds[i].fd == serv_sock){     // new connection
+                    if(pfds[i].fd == serv_sock){   // new connection
 
                         struct sockaddr_in cli_addr;
                         socklen_t cli_addr_len = sizeof(cli_addr);
@@ -140,7 +140,7 @@ int main(int argc, char **argv){
                         }
 
                         // Getting and displaying the client's address information
-                        char cli_ip[INET_ADDRSTRLEN];
+                        const char cli_ip[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, &cli_addr.sin_addr, cli_ip, sizeof(cli_ip));
                         unsigned short cli_port = ntohs(cli_addr.sin_port);
 
@@ -152,6 +152,8 @@ int main(int argc, char **argv){
                         if(!tmp){
                             perror("client realloc() error");
                             exit(EXIT_FAILURE);
+                            free(clients);
+                            free(pfds);
                         }
                         clients = tmp;
 
@@ -164,6 +166,8 @@ int main(int argc, char **argv){
                         if(!tmp){
                             perror("pfds realloc() error");
                             exit(EXIT_FAILURE);
+                            free(clients);
+                            free(pfds);
                         }
                         pfds = tmp;
                         pfds[n_pfds-1].fd = cli_sock;
@@ -190,14 +194,38 @@ int main(int argc, char **argv){
                                 i--;
                                 break;
                             }else{
-                                // Messages
+                                // Handling Messages
                                 buffer[n_read] = 0; // null termination
                                 char msg[n_read];
                                 strcpy(msg, buffer);
 
-                                printf("[%d] %s", cli_sock, msg);
+                                printf("DATA\n");
+                                printf("[%d] %s\n", cli_sock, msg);
+                                printf("--------------------------------\n");
 
-                                write(cli_sock, msg, sizeof(msg));
+                                // The HTTP Protocol
+                                // HTTP Method
+                                const char *method = strtok(msg, " ");
+                                printf("Method : %s\n", method);
+
+                                // File name
+                                const char *filename = strtok(NULL, " ");
+                                printf("Filename : %s\n", filename);
+
+                                printf("--------------------------------\n");
+
+                                // Header
+                                char *header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 45\r\nConnection: close\r\n\r\n";
+                                // Body
+                                char *body = "<html><body><h1>Hello World!</h1></body></html>";
+
+                                // Response
+                                char rep[strlen(header)+strlen(body)+1];
+                                strcpy(rep, header);
+                                strcat(rep, body);
+                                write(cli_sock, rep, strlen(rep)+1);
+                                //printf("%s\n", rep);
+                                //printf("msg sent\n");
 
                                 disconnect(cli_sock, &clients, &n_clients, &pfds, &n_pfds);
                                 i--;
@@ -211,5 +239,7 @@ int main(int argc, char **argv){
         }
     }
 
+    free(clients);
+    free(pfds);
     return 0;
 }
