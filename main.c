@@ -2,17 +2,20 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <poll.h>
+#include <errno.h>
 #include <string.h>
+#include <inttypes.h> // For PRIuMAX
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
 #define BACKLOGS 1
 #define BUFFER_SIZE 256
+#define BASE_PATH "www/html"
 
 typedef struct {
     unsigned int fd;
-    const char ip[INET_ADDRSTRLEN];
+    char ip[INET_ADDRSTRLEN];
     unsigned short port;
 }client_t;
 
@@ -29,18 +32,29 @@ void disconnect(unsigned int c_fd, client_t **clients, unsigned int *n_clients, 
     for(int i = 0; i < *n_clients; i++){
         // when the client has found, do as follows and break the loop (otherwise iterate the next loop)
         if(c_fd == (*clients)[i].fd){
+
+            // Making sure all the buffer have flushed(sent).
+            shutdown(c_fd, SHUT_WR); // This sends FIN pkt to the client
+            
+            // Keep reading client's remaining data
+            char buffer[4096];
+            ssize_t n_read;
+            while((n_read = read(c_fd, buffer, sizeof(buffer))) > 0){
+                // doing nth with client's data, we're just getting
+            }
+
             // Close the client socket
-            close((*clients)[i].fd);
+            close(c_fd); //close((*clients)[i].fd);
 
             // Remove the client struct from the `clients`
-            for(int k = i; k < *n_clients; k++){
+            for(int k = i; k < *n_clients-1; k++){  // *n_clients-1 because of (*clients)[k+1]
                 (*clients)[k] = (*clients)[k+1];
             }
             void *tmp = realloc(*clients, sizeof(client_t)*(--*n_clients));
             *clients = tmp;
 
             // Remove the client fd from the `pfds`
-            for(int j = 0; j < *n_pfds; j++){
+            for(int j = 0; j < *n_pfds-1; j++){     // *n_pfds-1 because of (*pfds)[k+1]
                 if((*pfds)[j].fd == c_fd){
                     for(int k = j; k < *n_pfds; k++){
                         (*pfds)[k] = (*pfds)[k+1];
@@ -59,6 +73,123 @@ void disconnect(unsigned int c_fd, client_t **clients, unsigned int *n_clients, 
             break;
         }
     }
+}
+
+void send_http_response(int cli_sock, unsigned int status_code, const char *status_msg, const char *content_t, FILE *file, off_t file_size){
+    char buffer[4096];
+    //size_t body_len = body ? strlen(body) : 0;
+
+    // Send header
+    snprintf(buffer, sizeof(buffer), 
+            "HTTP/1.1 %u %s\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %" PRIuMAX "\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            , status_code, status_msg, content_t, file_size);
+    if(write(cli_sock, buffer, strlen(buffer)) == -1){  // not sending null terminator which is not part of the http protocol
+        perror("Error sending header");
+        return;
+    }
+    printf("Header sent\n");
+
+    // Send body by streaming
+    size_t bytes_read;
+    while((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0){
+        printf("bytes_read : %d\n", bytes_read);
+
+        // this loop below enables us to send `bytes_read` separately in case of some issues
+        size_t total_written = 0;
+        while(total_written < bytes_read){
+            ssize_t bytes_sent = write(cli_sock, buffer+total_written, bytes_read-total_written);
+            if(bytes_sent < 0){
+                if(errno == EINTR) continue; // retry 
+                perror("Error sending file");
+                break;
+            }
+            printf("bytes_sent : %d\n", bytes_sent);
+            total_written += bytes_sent;
+        } 
+        // this is better than sending whole `bytes_read` at once as in `write(cli_sock, buffer, bytes_read);`
+    }
+}
+
+void handle_http_request(unsigned int cli_sock, const char *request){
+    /*
+    GET /index.html HTTP/1.1
+    Host: localhost:8080
+    User-Agent: Mozilla/5.0 (Chrome)
+    Accept: text/html
+    Connection: close
+    */
+    char method[16], path[256], file_state[16], version[16], full_path[sizeof(path)+strlen(BASE_PATH)+1];
+    char *req = strndup(request, strlen(request)+1); // we do not want to modify the original `request` on `strtok`
+    char *first_line = strtok(req, "\r\n"); // GET /index.html HTTP/1.1
+    sscanf(first_line, "%16s %256s %16s", method, path, version);
+    
+    //char *base = BASE_PATH;
+    strcpy(full_path, BASE_PATH);
+    strcat(full_path, path);
+
+    printf("%s\n", full_path);
+    if(strcmp(method, "GET") == 0){
+        FILE *file = fopen(full_path, "rb");
+        off_t f_size;
+        if(file != NULL){ // (strcmp(path, "/") == 0
+            // find file size
+            if(fseeko(file, 0, SEEK_END) == 0){
+                f_size = ftello(file);
+                printf("File size : %ld\n", f_size);
+                fseeko(file, 0, SEEK_SET);
+                if(f_size == -1){
+                    perror("Cannot get the size of the file");
+                    perror("ftello");
+                    
+                    free(req);
+                    return;
+                }
+            }else{
+                perror("fseeko");
+                free(req);
+                return;
+            }
+            //printf("file valid\n");
+            strcpy(file_state, "valid");
+            send_http_response(cli_sock, 200, "OK", "text/html", file, f_size);
+            fclose(file);  // this was the solution to why we cannot access form the outside network
+            //return;
+        }else{
+            //printf("file not valid\n");
+            const char *not_found = 
+                    "<html>"
+                    "<body>"
+                    "<h1>404 - Page Not Found</h1>"
+                    "</body>"
+                    "</html>";
+            strcpy(file_state, "not valid");
+            //send_http_response(cli_sock, 404, "Not Found", "text/html", not_found, strlen(not_found));
+            free(req);
+            // fclose(file); // <- `file` will be NULL here (this line will crash)
+            return;
+        }
+        //fclose(file);  <= i need to uncomment this line to see the page on client's browser, i don't know why
+    }
+    /*else if(strcmp(method, "POST") == 0){ 
+        send_http_response(cli_sock, 200, "OK", "text/html", body);
+    }*/
+    else{
+        const char *body = 
+            "<html>"
+            "<head><title>405 Method Not Allowed</title></head>"
+            "<body>"
+            "<h1>Hello World!</h1>"
+            "</body>"
+            "</html>";
+        //send_http_response(cli_sock, 405, "Method Not Allowed", "text/html", body);
+    }
+    printf("Method : %s\nPath: %s [%s]\nVersion: %s\n", method, path, file_state, version);
+
+    free(req);
 }
 
 int main(int argc, char **argv){
@@ -140,10 +271,11 @@ int main(int argc, char **argv){
                         }
 
                         // Getting and displaying the client's address information
-                        const char cli_ip[INET_ADDRSTRLEN];
+                        char cli_ip[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, &cli_addr.sin_addr, cli_ip, sizeof(cli_ip));
                         unsigned short cli_port = ntohs(cli_addr.sin_port);
 
+                        printf("========================\n");
                         printf("New connection\n");
                         printf("FD = %d, %s:%d\n", cli_sock, cli_ip, cli_port);
 
@@ -196,37 +328,9 @@ int main(int argc, char **argv){
                             }else{
                                 // Handling Messages
                                 buffer[n_read] = 0; // null termination
-                                char msg[n_read];
-                                strcpy(msg, buffer);
+                                handle_http_request(cli_sock, buffer);
 
-                                printf("DATA\n");
-                                printf("[%d] %s\n", cli_sock, msg);
-                                printf("--------------------------------\n");
-
-                                // The HTTP Protocol
-                                // HTTP Method
-                                const char *method = strtok(msg, " ");
-                                printf("Method : %s\n", method);
-
-                                // File name
-                                const char *filename = strtok(NULL, " ");
-                                printf("Filename : %s\n", filename);
-
-                                printf("--------------------------------\n");
-
-                                // Header
-                                char *header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 45\r\nConnection: close\r\n\r\n";
-                                // Body
-                                char *body = "<html><body><h1>Hello World!</h1></body></html>";
-
-                                // Response
-                                char rep[strlen(header)+strlen(body)+1];
-                                strcpy(rep, header);
-                                strcat(rep, body);
-                                write(cli_sock, rep, strlen(rep)+1);
-                                //printf("%s\n", rep);
-                                //printf("msg sent\n");
-
+                                // Disconnecting
                                 disconnect(cli_sock, &clients, &n_clients, &pfds, &n_pfds);
                                 i--;
                                 break;
