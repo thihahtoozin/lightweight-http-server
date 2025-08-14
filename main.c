@@ -145,6 +145,9 @@ void handle_http_request(unsigned int cli_sock, const char *request){
     char *req = strndup(request, strlen(request)+1); // we do not want to modify the original `request` on `strtok`
     char *first_line = strtok(req, "\r\n"); // GET /index.html HTTP/1.1
     sscanf(first_line, "%16s %256s %16s", method, path, version);
+    if(strcmp(path, "/") == 0){
+        strcpy(path, "/index.html");
+    }
     
     //char *base = BASE_PATH;
     strcpy(full_path, BASE_PATH);
