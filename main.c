@@ -12,6 +12,9 @@
 #define BACKLOGS 1
 #define BUFFER_SIZE 256
 #define BASE_PATH "www/html"
+#define BASE_CONFIG "config"
+#define FILE_404 "config/404.html"
+#define FILE_405 "config/405.html"
 
 typedef struct {
     unsigned int fd;
@@ -75,7 +78,7 @@ void disconnect(unsigned int c_fd, client_t **clients, unsigned int *n_clients, 
     }
 }
 
-void send_http_response(int cli_sock, unsigned int status_code, const char *status_msg, const char *content_t, FILE *file, off_t file_size){
+void send_http_response(int cli_sock, unsigned int status_code, char *status_msg, char *content_t, FILE *file, off_t file_size){
     char buffer[4096];
     //size_t body_len = body ? strlen(body) : 0;
 
@@ -114,6 +117,22 @@ void send_http_response(int cli_sock, unsigned int status_code, const char *stat
     }
 }
 
+off_t find_file_size(FILE *fp){
+    off_t f_size;
+    if(fseeko(fp, 0, SEEK_END) == 0){
+        f_size = ftello(fp);
+        fseeko(fp, 0, SEEK_SET);
+        if(f_size == -1){
+            perror("Cannot get the size of the file by ftello()");
+            return -1;
+            }
+    }else{
+        perror("Cannot find SEEK_END by fseeko()");
+        return -1;
+    }
+    return f_size;
+}
+
 void handle_http_request(unsigned int cli_sock, const char *request){
     /*
     GET /index.html HTTP/1.1
@@ -132,63 +151,71 @@ void handle_http_request(unsigned int cli_sock, const char *request){
     strcat(full_path, path);
 
     printf("%s\n", full_path);
+
+    unsigned int http_status;
+    char status_msg[64], content_t[64];
+    FILE *file = fopen(full_path, "rb");
+    off_t f_size;
     if(strcmp(method, "GET") == 0){
-        FILE *file = fopen(full_path, "rb");
-        off_t f_size;
         if(file != NULL){ // (strcmp(path, "/") == 0
-            // find file size
-            if(fseeko(file, 0, SEEK_END) == 0){
-                f_size = ftello(file);
-                printf("File size : %ld\n", f_size);
-                fseeko(file, 0, SEEK_SET);
-                if(f_size == -1){
-                    perror("Cannot get the size of the file");
-                    perror("ftello");
-                    
-                    free(req);
-                    return;
-                }
-            }else{
-                perror("fseeko");
+            // 200 OK
+
+            // Find file size
+            f_size = find_file_size(file);
+            if(f_size < 0){
                 free(req);
                 return;
             }
-            //printf("file valid\n");
+            printf("File size : %ld\n", f_size);
+
+            // Setting Values
             strcpy(file_state, "valid");
-            send_http_response(cli_sock, 200, "OK", "text/html", file, f_size);
-            fclose(file);  // this was the solution to why we cannot access form the outside network
-            //return;
+            http_status = 200;
+            strcpy(status_msg, "OK");
+            strcpy(content_t, "text/html");
+
         }else{
-            //printf("file not valid\n");
-            const char *not_found = 
-                    "<html>"
-                    "<body>"
-                    "<h1>404 - Page Not Found</h1>"
-                    "</body>"
-                    "</html>";
+            // 404 - Page Not Found
+
+            // Find file size
+            file = fopen(FILE_404, "rb");
+            f_size = find_file_size(file);
+            if(f_size < 0){
+                free(req);
+                return;
+            }
+
+            // Set values
             strcpy(file_state, "not valid");
-            //send_http_response(cli_sock, 404, "Not Found", "text/html", not_found, strlen(not_found));
-            free(req);
-            // fclose(file); // <- `file` will be NULL here (this line will crash)
-            return;
+            http_status = 404;
+            strcpy(status_msg, "Not Found");
+            strcpy(content_t, "text/html");
+
+            //send_http_response(cli_sock, 404, "Not Found", "text/html", file, f_size);
         }
-        //fclose(file);  <= i need to uncomment this line to see the page on client's browser, i don't know why
     }
     /*else if(strcmp(method, "POST") == 0){ 
         send_http_response(cli_sock, 200, "OK", "text/html", body);
     }*/
     else{
-        const char *body = 
-            "<html>"
-            "<head><title>405 Method Not Allowed</title></head>"
-            "<body>"
-            "<h1>Hello World!</h1>"
-            "</body>"
-            "</html>";
-        //send_http_response(cli_sock, 405, "Method Not Allowed", "text/html", body);
+        //405 - Method Not Allowed
+        
+        // Find file size
+        file = fopen(FILE_405, "rb");
+        f_size = find_file_size(file);
+        if(f_size < 0){
+            free(req);
+            return;
+        }
+
+        // Set values
+        http_status = 405;
+        strcpy(status_msg, "Method Not Allowed");
+        strcpy(content_t, "text/html");
     }
     printf("Method : %s\nPath: %s [%s]\nVersion: %s\n", method, path, file_state, version);
-
+    send_http_response(cli_sock, http_status, status_msg, content_t, file, f_size);
+    fclose(file);
     free(req);
 }
 
