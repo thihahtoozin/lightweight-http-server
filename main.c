@@ -78,6 +78,22 @@ void disconnect(unsigned int c_fd, client_t **clients, unsigned int *n_clients, 
     }
 }
 
+char *get_content_type(const char *filename){
+    //char content_type[32];
+    const char *ext = strrchr(filename, '.')+1;
+    if(!ext || ext == filename) return "";
+
+    if((strcmp(ext, "htm") == 0) || (strcmp(ext, "html")==0)){
+        return "text/html";
+    }else if(strcmp(ext, "css") ==0){
+        return "text/css";
+    }else if(strcmp(ext, "js") == 0){
+        return "application/javascript";
+    } 
+    return "";
+    //return content_type;
+}
+
 void send_http_response(int cli_sock, unsigned int status_code, char *status_msg, char *content_t, FILE *file, off_t file_size){
     char buffer[4096];
     //size_t body_len = body ? strlen(body) : 0;
@@ -175,7 +191,7 @@ void handle_http_request(unsigned int cli_sock, const char *request){
             strcpy(file_state, "valid");
             http_status = 200;
             strcpy(status_msg, "OK");
-            strcpy(content_t, "text/html");
+            strcpy(content_t, get_content_type(path));
 
         }else{
             // 404 - Page Not Found
@@ -192,7 +208,7 @@ void handle_http_request(unsigned int cli_sock, const char *request){
             strcpy(file_state, "not valid");
             http_status = 404;
             strcpy(status_msg, "Not Found");
-            strcpy(content_t, "text/html");
+            strcpy(content_t, get_content_type(FILE_404));
 
             //send_http_response(cli_sock, 404, "Not Found", "text/html", file, f_size);
         }
@@ -214,7 +230,7 @@ void handle_http_request(unsigned int cli_sock, const char *request){
         // Set values
         http_status = 405;
         strcpy(status_msg, "Method Not Allowed");
-        strcpy(content_t, "text/html");
+        strcpy(content_t, get_content_type(FILE_405));
     }
     printf("Method : %s\nPath: %s [%s]\nVersion: %s\n", method, path, file_state, version);
     send_http_response(cli_sock, http_status, status_msg, content_t, file, f_size);

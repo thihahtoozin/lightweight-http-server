@@ -1,9 +1,148 @@
 <!DOCTYPE html>
-<html>
-    <head>
-        <title>Testing</title>
-    </head>
-    <body>
-        <h1>Welcome</h1>
-    </body>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Basic HTML Page</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>Welcome to My Website</h1>
+        <p>A simple HTML page with basic structure</p>
+    </header>
+
+    <nav>
+        <ul>
+            <li><a href="#home">Home</a></li>
+            <li><a href="#about">About</a></li>
+            <li><a href="#services">Services</a></li>
+            <li><a href="#contact">Contact</a></li>
+        </ul>
+    </nav>
+
+    <main>
+        <section id="home">
+            <h2>Home Section</h2>
+            <p>This is the home section of our website. Here you can find an introduction to what we offer.</p>
+            <p>This page demonstrates basic HTML structure without any CSS styling or JavaScript functionality.</p>
+        </section>
+
+        <section id="about">
+            <h2>About Us</h2>
+            <p>We are a company dedicated to providing excellent services to our customers.</p>
+            <h3>Our Mission</h3>
+            <p>To deliver high-quality solutions that meet our clients' needs.</p>
+            <h3>Our Values</h3>
+            <ul>
+                <li>Quality</li>
+                <li>Integrity</li>
+                <li>Innovation</li>
+                <li>Customer Focus</li>
+            </ul>
+        </section>
+
+        <section id="services">
+            <h2>Our Services</h2>
+            <p>We offer a variety of services to help you succeed:</p>
+            <ol>
+                <li>Web Development</li>
+                <li>Graphic Design</li>
+                <li>Digital Marketing</li>
+                <li>Consulting</li>
+            </ol>
+            
+            <h3>Service Details</h3>
+            <table border="1">
+                <tr>
+                    <th>Service</th>
+                    <th>Duration</th>
+                    <th>Price Range</th>
+                </tr>
+                <tr>
+                    <td>Web Development</td>
+                    <td>2-8 weeks</td>
+                    <td>$500-$5000</td>
+                </tr>
+                <tr>
+                    <td>Graphic Design</td>
+                    <td>1-3 weeks</td>
+                    <td>$200-$1500</td>
+                </tr>
+                <tr>
+                    <td>Digital Marketing</td>
+                    <td>Ongoing</td>
+                    <td>$300-$2000/month</td>
+                </tr>
+                <tr>
+                    <td>Consulting</td>
+                    <td>1-4 hours</td>
+                    <td>$100-$300/hour</td>
+                </tr>
+            </table>
+        </section>
+
+        <section id="contact">
+            <h2>Contact Us</h2>
+            <p>Get in touch with us using the information below:</p>
+            
+            <address>
+                <strong>Company Name</strong><br>
+                123 Main Street<br>
+                City, State 12345<br>
+                Phone: (555) 123-4567<br>
+                Email: <a href="mailto:info@company.com">info@company.com</a>
+            </address>
+
+            <h3>Send us a message</h3>
+            <form>
+                <label for="name">Name:</label><br>
+                <input type="text" id="name" name="name"><br><br>
+                
+                <label for="email">Email:</label><br>
+                <input type="email" id="email" name="email"><br><br>
+                
+                <label for="subject">Subject:</label><br>
+                <input type="text" id="subject" name="subject"><br><br>
+                
+                <label for="message">Message:</label><br>
+                <textarea id="message" name="message" rows="5" cols="50"></textarea><br><br>
+                
+                <input type="submit" value="Send Message">
+            </form>
+        </section>
+    </main>
+
+    <aside>
+        <h3>Quick Links</h3>
+        <ul>
+            <li><a href="https://www.example.com" target="_blank">External Link 1</a></li>
+            <li><a href="https://www.example.org" target="_blank">External Link 2</a></li>
+            <li><a href="downloads/brochure.pdf" download>Download Brochure</a></li>
+        </ul>
+
+        <h3>Latest News</h3>
+        <article>
+            <h4>News Article 1</h4>
+            <time datetime="2025-08-14">August 14, 2025</time>
+            <p>This is a summary of our latest news article. Click to read more.</p>
+        </article>
+        
+        <article>
+            <h4>News Article 2</h4>
+            <time datetime="2025-08-10">August 10, 2025</time>
+            <p>Another important update from our company. Stay informed with our latest developments.</p>
+        </article>
+    </aside>
+
+    <footer>
+        <hr>
+        <p>&copy; 2025 My Company. All rights reserved.</p>
+        <p>
+            <a href="#home">Back to top</a> | 
+            <a href="privacy.html">Privacy Policy</a> | 
+            <a href="terms.html">Terms of Service</a>
+        </p>
+    </footer>
+</body>
 </html>
