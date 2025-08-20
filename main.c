@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <poll.h>
 #include <errno.h>
@@ -16,10 +17,31 @@
 #define FILE_404 "config/404.html"
 #define FILE_405 "config/405.html"
 
+typedef enum {
+    READING_REQ,
+    SENDING_HEADER,
+    SENDING_FILE,
+    CONN_DONE
+}client_state_t;
+
 typedef struct {
-    unsigned int fd;
+    int fd;
     char ip[INET_ADDRSTRLEN];
     unsigned short port;
+
+    // for tracking state
+    client_state_t state;
+    FILE *file;
+    size_t file_size;
+    size_t file_offset;
+
+    char file_buffer[4096];
+    size_t file_buffer_len;
+    size_t file_buffer_offset;
+
+    char *header;
+    size_t header_len;
+    size_t header_offset;
 }client_t;
 
 void display_clients(client_t *clients, unsigned int n_clients){
@@ -30,11 +52,36 @@ void display_clients(client_t *clients, unsigned int n_clients){
     printf("------------------------------------\n");
 }
 
-void disconnect(unsigned int c_fd, client_t **clients, unsigned int *n_clients, struct pollfd **pfds, unsigned int *n_pfds){
+void cleanup_client(client_t *client){
+    if(client->file){
+        fclose(client->file);
+        client->file = NULL;
+    }
+    if(client->header){
+        free(client->header);
+        client->header = NULL;
+    }
+}
+
+int set_nonblocking(int fd){
+    // fd must be opened
+    int flags = fcntl(fd, F_GETFL);
+    flags |= O_NONBLOCK;
+    if(fcntl(fd, F_SETFL, flags) < 0){
+        perror("F_SETFL");
+        return 1;
+    }
+    return 0;
+}
+
+void disconnect(int c_fd, client_t **clients, unsigned int *n_clients, struct pollfd **pfds, unsigned int *n_pfds){
     // Search the client socket
     for(int i = 0; i < *n_clients; i++){
         // when the client has found, do as follows and break the loop (otherwise iterate the next loop)
         if(c_fd == (*clients)[i].fd){
+
+            // Clean up client resources
+            cleanup_client(&(*clients)[i]);
 
             // Making sure all the buffer have flushed(sent).
             shutdown(c_fd, SHUT_WR); // This sends FIN pkt to the client
@@ -94,43 +141,96 @@ char *get_content_type(const char *filename){
     //return content_type;
 }
 
-void send_http_response(int cli_sock, unsigned int status_code, char *status_msg, char *content_t, FILE *file, off_t file_size){
-    char buffer[4096];
-    //size_t body_len = body ? strlen(body) : 0;
+void prepare_http_response(client_t *client, unsigned int status_code, char *status_msg, char *content_t, FILE *file, off_t file_size){
 
-    // Send header
-    snprintf(buffer, sizeof(buffer), 
+    // Prepare file
+    client->file = file;
+    client->file_size = file_size;
+    client->file_offset = 0;
+    client->file_buffer_len = 0;
+    client->file_buffer_offset = 0;
+
+    // Prepare header
+    char header[1024];
+    int header_len = snprintf(header, sizeof(header), 
             "HTTP/1.1 %u %s\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %" PRIuMAX "\r\n"
             "Connection: close\r\n"
             "\r\n"
-            , status_code, status_msg, content_t, file_size);
-    if(write(cli_sock, buffer, strlen(buffer)) == -1){  // not sending null terminator which is not part of the http protocol
-        perror("Error sending header");
-        return;
+            , status_code, status_msg, content_t, (uintmax_t)file_size);
+    client->header = malloc(header_len+1);
+    memcpy(client->header, header, header_len);
+    client->header_len = header_len;
+    client->header_offset = 0;
+
+    client->state = SENDING_HEADER;
+}
+
+// RETURN VALUES: 0 (not finished), 1 (finished), -1 (error)
+int send_header_chunk(client_t *client){
+    // Check if the header is fully sent
+    if(client->header_offset >= client->header_len){
+        client->state = SENDING_FILE;
+        return 1;
     }
-    printf("Header sent\n");
 
-    // Send body by streaming
-    size_t bytes_read;
-    while((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0){
-        printf("bytes_read : %d\n", bytes_read);
+    // Sending the header
+    ssize_t n_write = write(client->fd,
+            client->header + client->header_offset,
+            client->header_len - client->header_offset);
+    // Not finish sending header
+    if(n_write < 0){
+        if(errno != EAGAIN || errno != EWOULDBLOCK){
+            perror("Cannot write to the socket");
+            return -1;
+        }
+    }
+    client->header_offset += n_write;
+    return 0;
+}
 
-        // this loop below enables us to send `bytes_read` separately in case of some issues
-        size_t total_written = 0;
-        while(total_written < bytes_read){
-            ssize_t bytes_sent = write(cli_sock, buffer+total_written, bytes_read-total_written);
-            if(bytes_sent < 0){
-                if(errno == EINTR) continue; // retry 
-                perror("Error sending file");
-                break;
+// RETURN VALUES: 0 (not finished), 1 (finished), -1 (error)
+int send_file_chunk(client_t *client){
+    
+    /* Check if the buffer has fully sent */
+    if(client->file_buffer_offset >= client->file_buffer_len){
+        /* Check if the file has fully sent */
+        if(client->file_offset >= client->file_size){
+            client->state = CONN_DONE;
+            return 1;
+        }
+
+        size_t to_read = sizeof(client->file_buffer);
+        if(client->file_offset + to_read > client->file_size){
+            to_read = client->file_size - client->file_offset;
+        }
+
+        client->file_buffer_len = fread(client->file_buffer, 1, to_read, client->file);
+        client->file_buffer_offset = 0;
+        if(client->file_buffer_len == 0){
+            if(feof(client->file)){
+                client->state = CONN_DONE;
+                return 1;
+            }else{
+                perror("Cannot read the file");
+                return -1;
             }
-            printf("bytes_sent : %d\n", bytes_sent);
-            total_written += bytes_sent;
-        } 
-        // this is better than sending whole `bytes_read` at once as in `write(cli_sock, buffer, bytes_read);`
+        }
     }
+
+    ssize_t n_write = write(client->fd, client->file_buffer, client->file_buffer_len);
+    if(n_write < 0){
+        if(errno != EAGAIN || errno != EWOULDBLOCK){
+            perror("Cannot write to the socket");
+            return -1;
+        }
+    }
+
+    client->file_buffer_offset += n_write;
+    client->file_offset += n_write;
+    printf("File progress %ld/%ld bytes sent\n", client->file_offset, client->file_size);
+    return 0;
 }
 
 off_t find_file_size(FILE *fp){
@@ -149,7 +249,7 @@ off_t find_file_size(FILE *fp){
     return f_size;
 }
 
-void handle_http_request(unsigned int cli_sock, const char *request){
+void handle_http_request(client_t *client, const char *request){
     /*
     GET /index.html HTTP/1.1
     Host: localhost:8080
@@ -160,7 +260,9 @@ void handle_http_request(unsigned int cli_sock, const char *request){
     char method[16], path[256], file_state[16], version[16], full_path[sizeof(path)+strlen(BASE_PATH)+1];
     char *req = strndup(request, strlen(request)+1); // we do not want to modify the original `request` on `strtok`
     char *first_line = strtok(req, "\r\n"); // GET /index.html HTTP/1.1
-    sscanf(first_line, "%16s %256s %16s", method, path, version);
+    if(sscanf(first_line, "%15s %255s %15s", method, path, version) != 3){
+        perror("sscanf()");
+    }
     if(strcmp(path, "/") == 0){
         strcpy(path, "/index.html");
     }
@@ -210,11 +312,9 @@ void handle_http_request(unsigned int cli_sock, const char *request){
             strcpy(status_msg, "Not Found");
             strcpy(content_t, get_content_type(FILE_404));
 
-            //send_http_response(cli_sock, 404, "Not Found", "text/html", file, f_size);
         }
     }
     /*else if(strcmp(method, "POST") == 0){ 
-        send_http_response(cli_sock, 200, "OK", "text/html", body);
     }*/
     else{
         //405 - Method Not Allowed
@@ -233,8 +333,7 @@ void handle_http_request(unsigned int cli_sock, const char *request){
         strcpy(content_t, get_content_type(FILE_405));
     }
     printf("Method : %s\nPath: %s [%s]\nVersion: %s\n", method, path, file_state, version);
-    send_http_response(cli_sock, http_status, status_msg, content_t, file, f_size);
-    fclose(file);
+    prepare_http_response(client, http_status, status_msg, content_t, file, f_size);
     free(req);
 }
 
@@ -249,11 +348,14 @@ int main(int argc, char **argv){
     unsigned short serv_port = atoi(argv[2]);
     
     // Establishing server socket
-    unsigned int serv_sock = socket(AF_INET, SOCK_STREAM, 0);
+    int serv_sock = socket(AF_INET, SOCK_STREAM, 0);
     if(serv_sock == -1){
         perror("Failed to create a socket for server");
         exit(EXIT_FAILURE);
     }
+
+    // Setting Non-blocking flag
+    set_nonblocking(serv_sock);
 
     // Setting socket option
     int opt = 1;
@@ -295,6 +397,25 @@ int main(int argc, char **argv){
     pfds->events = POLLIN;      // adding event type 0x0001
 
     while(1){
+        // Check each client status and set POLLIN/POLLOUT accordingly
+        for(int i = 1; i < n_pfds; i++){
+            for(int j = 0; j < n_clients; j++){
+                if(clients[j].fd == pfds[i].fd){
+                    switch(clients[j].state){
+                        case READING_REQ:
+                            pfds[i].events = POLLIN;
+                            break;
+                        case SENDING_HEADER:
+                        case SENDING_FILE:
+                            pfds[i].events = POLLOUT;
+                            break;
+                        case CONN_DONE:
+                            pfds[i].events = 0;
+                            break;
+                    }
+                }
+            }
+        }
 
         int n_ready = poll(pfds, n_pfds, -1);
         if(n_ready < 0){
@@ -304,92 +425,146 @@ int main(int argc, char **argv){
             free(pfds);
         }else if(n_ready > 0){
             for(int i = 0; i < n_pfds; i++){
-                if(pfds[i].revents & POLLIN){      // there is any data to read
-                    if(pfds[i].fd == serv_sock){   // new connection
+                if(pfds[i].fd == serv_sock && (pfds[i].revents & POLLIN)){      // there is any data to read
 
-                        struct sockaddr_in cli_addr;
-                        socklen_t cli_addr_len = sizeof(cli_addr);
+                    // New Connection
+                    struct sockaddr_in cli_addr;
+                    socklen_t cli_addr_len = sizeof(cli_addr);
 
-                        unsigned int cli_sock = accept(serv_sock, (struct sockaddr *) &cli_addr, &cli_addr_len);
-                        if(cli_sock == -1){
-                            perror("Accept failed");
-                            continue;
-                        }
+                    // Accepting the connection
+                    int cli_sock = accept(serv_sock, (struct sockaddr *) &cli_addr, &cli_addr_len);
+                    if(cli_sock == -1){
+                        perror("Accept failed");
+                        continue;
+                    }
 
-                        // Getting and displaying the client's address information
-                        char cli_ip[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, &cli_addr.sin_addr, cli_ip, sizeof(cli_ip));
-                        unsigned short cli_port = ntohs(cli_addr.sin_port);
+                    // Make client socket non-blocking
+                    set_nonblocking(cli_sock);
 
-                        printf("========================\n");
-                        printf("New connection\n");
-                        printf("FD = %d, %s:%d\n", cli_sock, cli_ip, cli_port);
+                    // Getting and displaying the client's address information
+                    char cli_ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &cli_addr.sin_addr, cli_ip, sizeof(cli_ip));
+                    unsigned short cli_port = ntohs(cli_addr.sin_port);
 
-                        // Resize and update the `clients`
-                        void *tmp = realloc(clients, sizeof(client_t) * (++n_clients));
-                        if(!tmp){
-                            perror("client realloc() error");
-                            exit(EXIT_FAILURE);
-                            free(clients);
-                            free(pfds);
-                        }
-                        clients = tmp;
+                    printf("========================\n");
+                    printf("New connection\n");
+                    printf("FD = %d, %s:%d\n", cli_sock, cli_ip, cli_port);
 
-                        clients[n_clients-1].fd = cli_sock;
-                        strcpy(clients[n_clients-1].ip, cli_ip);
-                        clients[n_clients-1].port = cli_port;
+                    // Resize and update the `clients`
+                    void *tmp = realloc(clients, sizeof(client_t) * (n_clients+1));
+                    if(!tmp){
+                        perror("client realloc() error");
+                        free(clients);
+                        free(pfds);
+                        exit(EXIT_FAILURE);
+                    }
+                    clients = tmp;
 
-                        // Resize and update the `pfds`
-                        tmp = realloc(pfds, sizeof(struct pollfd) * (++n_pfds));
-                        if(!tmp){
-                            perror("pfds realloc() error");
-                            exit(EXIT_FAILURE);
-                            free(clients);
-                            free(pfds);
-                        }
-                        pfds = tmp;
-                        pfds[n_pfds-1].fd = cli_sock;
-                        pfds[n_pfds-1].events = POLLIN;
+                    // Setting up new clients
+                    clients[n_clients].fd = cli_sock;
+                    strcpy(clients[n_clients].ip, cli_ip);
+                    clients[n_clients].port = cli_port;
 
-                        // Dispalying all clients
-                        display_clients(clients, n_clients);
+                    clients[n_clients].state = READING_REQ;
 
-                    }else{
-                        unsigned int cli_sock = pfds[i].fd;
-                        // send, receive and disconnect
-                        while(1){
-                            char buffer[BUFFER_SIZE];
-                            unsigned n_read = read(cli_sock, buffer, sizeof(buffer));
+                    clients[n_clients].file = NULL;
+                    clients[n_clients].file_size = 0;
+                    clients[n_clients].file_offset = 0;
 
-                            if(n_read == 0){
-                                // Disconnects
-                                printf("%d\n", cli_sock);
-                                disconnect(cli_sock, &clients, &n_clients, &pfds, &n_pfds);
-                                printf("[%d] Client disconnected\n", cli_sock);
-                                printf("n_pfds : %d\n", n_pfds);
-                                printf("n_clients : %d\n", n_clients);
-                                // adjust the loop logic
-                                i--;
-                                break;
-                            }else{
-                                // Handling Messages
-                                buffer[n_read] = 0; // null termination
-                                handle_http_request(cli_sock, buffer);
+                    clients[n_clients].file_buffer_len = 0;
+                    clients[n_clients].file_buffer_offset = 0;
 
-                                // Disconnecting
-                                disconnect(cli_sock, &clients, &n_clients, &pfds, &n_pfds);
-                                i--;
-                                break;
-                            }
+                    clients[n_clients].header = NULL;
+                    clients[n_clients].header_len = 0;
+                    clients[n_clients].header_offset = 0;
 
+                    n_clients++;
+
+                    // Resize and update the `pfds`
+                    tmp = realloc(pfds, sizeof(struct pollfd) * (n_pfds+1));
+                    if(!tmp){
+                        perror("pfds realloc() error");
+                        free(clients);
+                        free(pfds);
+                        exit(EXIT_FAILURE);
+                    }
+                    pfds = tmp;
+                    pfds[n_pfds].fd = cli_sock;
+                    pfds[n_pfds].events = POLLIN;
+                    pfds[n_pfds].revents = 0;
+                    n_pfds++;
+
+                    // Dispalying all clients
+                    display_clients(clients, n_clients);
+
+                //--------    
+                }else if(pfds[i].revents & (POLLIN | POLLOUT)){
+                    /* Reading and Writing with clients */
+
+                    // Find client
+                    client_t *client;
+                    for(int j = 0; j < n_clients; j++){
+                        if(clients[j].fd == pfds[i].fd){
+                            client = &clients[j];
                         }
                     }
-                }
-            } 
+
+                    if(client->state == READING_REQ && pfds[i].revents == POLLIN){
+
+                        /* Receive data or Disconnect */
+                        char buffer[BUFFER_SIZE];
+                        ssize_t n_read = read(client->fd, buffer, sizeof(buffer));
+
+                        if(n_read == 0){
+                            /* Disconnects */
+                            printf("%d\n", client->fd);
+                            disconnect(client->fd, &clients, &n_clients, &pfds, &n_pfds);
+                            //printf("[%d] Client disconnected\n", client->fd);
+                            printf("Client disconnected\n");
+                            printf("n_pfds : %d\n", n_pfds);
+                            printf("n_clients : %d\n", n_clients);
+                            i--; // adjust the loop counter
+                        }else if(n_read < 0){
+                            /* No data to read for now. Can move on to next poll */
+                            if(errno != EAGAIN || errno != EWOULDBLOCK){
+                                // Cannot read from the socket
+                                perror("Cannot read from the socket");
+                                disconnect(client->fd, &clients, &n_clients, &pfds, &n_pfds);
+                                i--;
+                            }
+                        }else{
+                            /* Handling Messages */
+                            buffer[n_read] = 0; // null termination
+                            handle_http_request(client, buffer);
+                        }
+                    }else if(pfds[i].revents & POLLOUT){
+                        int result = 0;
+                        if(client->state == SENDING_HEADER){
+                            result = send_header_chunk(client);
+                        }else if(client->state == SENDING_FILE){
+                            result = send_file_chunk(client);
+                        }
+                        if(result == 1){
+                            if(client->state == CONN_DONE){
+                                disconnect(client->fd, &clients, &n_clients, &pfds, &n_pfds);
+                                i--;
+                            }
+                        }else if(result == -1){
+                            fprintf(stderr, "Error sending to the client %d\n", client->fd);
+                            disconnect(client->fd, &clients, &n_clients, &pfds, &n_pfds);
+                            i--;
+                        }
+                    }
+                } 
+            }
         }
     }
 
+    for(int i = 0; i < n_clients; i++){
+        cleanup_client(&clients[i]);
+    }
     free(clients);
     free(pfds);
+    close(serv_sock);
     return 0;
 }
