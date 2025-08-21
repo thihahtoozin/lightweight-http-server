@@ -32,7 +32,7 @@ typedef struct {
     // for tracking state
     client_state_t state;
     FILE *file;
-    size_t file_size;
+    off_t file_size;
     size_t file_offset;
 
     char file_buffer[4096];
@@ -139,6 +139,27 @@ char *get_content_type(const char *filename){
     } 
     return "";
     //return content_type;
+}
+
+void prepare_http_redirect(client_t *client, const char *location_url){
+    char header[1024];
+    int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 302 Found\r\n"
+            "Location: %s\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            location_url);
+    client->header = malloc(header_len+1);
+    memcpy(client->header, header, header_len);
+    client->header_len = header_len;
+    client->header_offset = 0;
+
+    client->file = NULL;
+    client->file_size = 0;
+    client->file_offset = 0;
+
+    client->state = SENDING_HEADER;
 }
 
 void prepare_http_response(client_t *client, unsigned int status_code, char *status_msg, char *content_t, FILE *file, off_t file_size){
@@ -278,7 +299,11 @@ void handle_http_request(client_t *client, const char *request){
     FILE *file = fopen(full_path, "rb");
     off_t f_size;
     if(strcmp(method, "GET") == 0){
-        if(file != NULL){ // (strcmp(path, "/") == 0
+        if(strcmp(path, "/oldpage.html") == 0){
+            prepare_http_redirect(client, "/index.html");
+            free(req);
+            return;
+        }else if(file != NULL){ // (strcmp(path, "/") == 0
             // 200 OK
 
             // Find file size
