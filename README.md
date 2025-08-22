@@ -19,13 +19,19 @@ Track the state for each client.
 ## Configuration
 Place your files under `www/html`
 ```
+├── Makefile
 ├── README.md
-└── www
-    └── html
-        ├── index.html
-        ├── script.js
-        └── styles.css
-
+├── config
+│   ├── 404.html
+│   ├── 405.html
+│   ├── mime.types
+│   └── www
+│       └── html
+│           ├── bak
+│           ├── index.html
+│           ├── index.html.bak
+│           ├── script.js
+│           └── styles.css
 ```
 
 Error pages
@@ -35,18 +41,29 @@ config/405.html
 ```
 
 ## Installation and Usage
+
+Clone this repository
+```
+git clone https://github.com/thihahtoozin/lightweight-http-server.git
+```
+
+`cd` in project directory
+```
+cd lightweight-http-server
+```
+
 Compile the code using `gcc`
 ```
-gcc -o server main.c
+make build/server
 ```
 
 Run the server
 ```
-./server <ip> <port>
+./build/server <ip> <port>
 ```
 Example
 ```
-./server 127.0.0.1 8080
+./build/server 127.0.0.1 8080
 ```
 
 ## Known Issues
